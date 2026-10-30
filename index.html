@@ -98,7 +98,9 @@
     }
     .clear-btn:hover { color: var(--danger); }
     .clear-btn[hidden] { display: none; }
+    .error { color: var(--danger); font-size: 0.9rem; margin: 0 0 12px; }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 </head>
 <body>
   <main>
@@ -110,8 +112,9 @@
       <button type="submit" class="add-btn">추가</button>
     </form>
 
+    <p class="error" id="error" hidden></p>
     <ul id="list"></ul>
-    <p class="empty" id="empty">아직 아이템이 없어요.</p>
+    <p class="empty" id="empty">불러오는 중…</p>
 
     <div class="footer">
       <button class="clear-btn" id="clear-done" hidden>완료된 항목 지우기</button>
@@ -119,27 +122,61 @@
   </main>
 
   <script>
-    const STORAGE_KEY = 'shopping-list-items';
+    // 공개용(publishable) 키라 브라우저 코드에 넣어도 됩니다. 접근 범위는 RLS 정책으로 제한돼요.
+    const SUPABASE_URL = 'https://yvtqkjsebnacsilqblpo.supabase.co';
+    const SUPABASE_KEY = 'sb_publishable_fUgTsaFTKFG7jR7Lt1gQbA_RsLhrPkL';
+    const TABLE = 'shopping_items';
+    const LEGACY_STORAGE_KEY = 'shopping-list-items';
+
+    const db = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+
     const form = document.getElementById('add-form');
     const input = document.getElementById('item-input');
     const list = document.getElementById('list');
     const empty = document.getElementById('empty');
     const summary = document.getElementById('summary');
     const clearDone = document.getElementById('clear-done');
+    const errorBox = document.getElementById('error');
 
-    let items = load();
+    let items = [];
 
-    function load() {
-      try {
-        return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
-      } catch {
-        return [];
-      }
+    function showError(message, error) {
+      if (error) console.error(error);
+      errorBox.textContent = message;
+      errorBox.hidden = !message;
     }
 
-    function save() {
+    async function load() {
+      const { data, error } = await db
+        .from(TABLE)
+        .select('id, text, done')
+        .order('created_at');
+      if (error) {
+        showError('목록을 불러오지 못했어요.', error);
+        empty.textContent = '';
+        return;
+      }
+      items = data;
+      empty.textContent = '아직 아이템이 없어요.';
+      render();
+    }
+
+    // 예전 버전에서 localStorage에 저장해 둔 항목을 한 번만 DB로 옮깁니다.
+    async function migrateLegacyItems() {
+      let legacy = [];
       try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
+        legacy = JSON.parse(localStorage.getItem(LEGACY_STORAGE_KEY)) || [];
+      } catch {}
+      if (!legacy.length) return;
+
+      const rows = legacy.map(i => ({ text: i.text, done: !!i.done }));
+      const { error } = await db.from(TABLE).insert(rows);
+      if (error) {
+        showError('예전 항목을 옮기지 못했어요.', error);
+        return;
+      }
+      try {
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
       } catch {}
     }
 
@@ -178,42 +215,58 @@
         : '';
     }
 
-    function add(text) {
-      const id = Math.max(0, ...items.map(i => i.id)) + 1;
-      items.push({ id, text, done: false });
-      save();
+    async function add(text) {
+      const { data, error } = await db
+        .from(TABLE)
+        .insert({ text })
+        .select('id, text, done')
+        .single();
+      if (error) return showError('추가하지 못했어요.', error);
+      showError('');
+      items.push(data);
       render();
     }
 
-    function toggle(id) {
+    async function toggle(id) {
       const item = items.find(i => i.id === id);
-      if (item) item.done = !item.done;
-      save();
+      if (!item) return;
+      const { error } = await db.from(TABLE).update({ done: !item.done }).eq('id', id);
+      if (error) {
+        showError('변경하지 못했어요.', error);
+        return render();
+      }
+      showError('');
+      item.done = !item.done;
       render();
     }
 
-    function remove(id) {
+    async function remove(id) {
+      const { error } = await db.from(TABLE).delete().eq('id', id);
+      if (error) return showError('삭제하지 못했어요.', error);
+      showError('');
       items = items.filter(i => i.id !== id);
-      save();
       render();
     }
 
-    form.addEventListener('submit', e => {
+    form.addEventListener('submit', async e => {
       e.preventDefault();
       const text = input.value.trim();
       if (!text) return;
-      add(text);
       input.value = '';
       input.focus();
+      await add(text);
     });
 
-    clearDone.addEventListener('click', () => {
+    clearDone.addEventListener('click', async () => {
+      const doneIds = items.filter(i => i.done).map(i => i.id);
+      const { error } = await db.from(TABLE).delete().in('id', doneIds);
+      if (error) return showError('완료된 항목을 지우지 못했어요.', error);
+      showError('');
       items = items.filter(i => !i.done);
-      save();
       render();
     });
 
-    render();
+    migrateLegacyItems().then(load);
   </script>
 </body>
 </html>
